@@ -140,7 +140,8 @@ function main() {
 }
 
 function initRpcServer() {
-    adapter.getPort(2000, function (port) {
+    var randomPort = Math.floor(Math.random() * (63000)) + 1999;
+    adapter.getPort(randomPort, function (port) {
         rpcServerStarted = true;
         var protocol;
         if (adapter.config.type === 'bin') {

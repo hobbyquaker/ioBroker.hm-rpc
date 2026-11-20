@@ -12,12 +12,16 @@ import { MockDatabase, type MockAdapter } from '@iobroker/testing';
 import type { FakeBox } from 'occulite-client/testing';
 import {
     completeAdapterMock,
+    DESCRIPTIONS,
     DEVICE,
+    DEVICES,
     IFACE,
     liteUrlPartsOf,
+    metaDocument,
     startFakeBox,
     stopTimers,
     TOKEN,
+    VALUES,
     waitFor,
 } from './liteTestUtil';
 
@@ -87,7 +91,6 @@ describe('hm-rpc in the openccu-lite mode', function () {
         return {
             daemon: 'openccu-lite',
             ...liteUrlPartsOf(box!.url),
-            liteInterface: IFACE,
             liteToken: TOKEN,
             liteFingerprint: '',
             liteNames: true,
@@ -202,8 +205,9 @@ describe('hm-rpc in the openccu-lite mode', function () {
             expect(room.common.name).to.equal('Living room'); // the system language defaults to English
             expect(Object.values(room.common.members)).to.deep.equal([CH1]);
             expect(Object.values(db.getObject('enum.functions.licht')!.common.members)).to.deep.equal([CH1]);
-            // one instance, one interface: the daemon follows the interface
-            expect(adapter!.config.daemon).to.equal('HMIP');
+            // one instance for every interface: the mode stays, the daemon of a device follows its interface
+            expect(adapter!.config.daemon).to.equal('openccu-lite');
+            expect(db.getObject(DEV)?.native.liteInterface).to.equal(IFACE);
             expect(adapter!.log.error.called, JSON.stringify(adapter!.log.error.args)).to.equal(false);
         });
 
@@ -454,6 +458,266 @@ describe('hm-rpc in the openccu-lite mode', function () {
         });
     });
 
+    describe('one instance for every interface of the system', () => {
+        const BIDCOS = 'BidCos-RF';
+        const SW = 'MEQ0123456';
+        const BIDCOS_DEVICES = [
+            { ADDRESS: SW, TYPE: 'HM-LC-Sw1-Pl-2', VERSION: 1, CHILDREN: [`${SW}:1`], PARAMSETS: ['MASTER'] },
+            {
+                ADDRESS: `${SW}:1`,
+                TYPE: 'SWITCH',
+                PARENT: SW,
+                PARENT_TYPE: 'HM-LC-Sw1-Pl-2',
+                VERSION: 1,
+                PARAMSETS: ['MASTER', 'VALUES'],
+            },
+        ];
+        const VIRTUAL = 'VirtualDevices';
+        const GROUP = 'INT0000001';
+        const VIRTUAL_DEVICES = [
+            { ADDRESS: GROUP, TYPE: 'HmIP-HEATING', VERSION: 1, CHILDREN: [`${GROUP}:1`], PARAMSETS: ['MASTER'] },
+            {
+                ADDRESS: `${GROUP}:1`,
+                TYPE: 'HEATING_CLIMATECONTROL_TRANSCEIVER',
+                PARENT: GROUP,
+                PARENT_TYPE: 'HmIP-HEATING',
+                VERSION: 1,
+                PARAMSETS: ['MASTER', 'VALUES'],
+            },
+        ];
+
+        async function startMulti(opts: Record<string, unknown> = {}): Promise<void> {
+            const meta = metaDocument();
+            meta.objects[`${BIDCOS}.${SW}`] = { name: 'Steckdose' };
+            meta.objects[`${BIDCOS}.${SW}:1`] = { name: 'Steckdose Schalter', enums: ['room/og/bad'] };
+            box = await startFakeBox({
+                interfaces: [IFACE, BIDCOS, VIRTUAL],
+                devices: {
+                    [IFACE]: structuredClone(DEVICES),
+                    [BIDCOS]: structuredClone(BIDCOS_DEVICES),
+                    [VIRTUAL]: structuredClone(VIRTUAL_DEVICES),
+                },
+                descriptions: {
+                    ...DESCRIPTIONS,
+                    [`${BIDCOS}.${SW}:1`]: { STATE: { TYPE: 'BOOL', OPERATIONS: 7 } },
+                    [`${VIRTUAL}.${GROUP}:1`]: {
+                        SET_POINT_TEMPERATURE: {
+                            TYPE: 'FLOAT',
+                            OPERATIONS: 7,
+                            CONTROL: 'HEATING_CONTROL.SETPOINT',
+                        } as any,
+                    },
+                },
+                values: { ...structuredClone(VALUES), [`${BIDCOS}.${SW}:1.STATE`]: { value: true, confirmed: true } },
+                meta,
+                ...opts,
+            });
+        }
+
+        it('creates, names and follows the devices of all interfaces, each request to its interface', async () => {
+            await startMulti();
+            await start(liteConfig());
+            await created();
+            await waitFor(() => db.getObject(`${NS}.${SW}.1.STATE`) !== undefined, 5000, 'the BidCos objects');
+            await waitFor(
+                () => db.getObject(`${NS}.${GROUP}.1.SET_POINT_TEMPERATURE`) !== undefined,
+                5000,
+                'the virtual objects',
+            );
+            expect(adapter!.log.info.calledWithMatch(/connecting to .* for all its interfaces/)).to.equal(true);
+            // the interface is recorded in every device and channel
+            expect(db.getObject(`${NS}.${SW}`)!.native.liteInterface).to.equal(BIDCOS);
+            expect(db.getObject(`${NS}.${SW}.1`)!.native.liteInterface).to.equal(BIDCOS);
+            expect(db.getObject(CH1)!.native.liteInterface).to.equal(IFACE);
+            expect(db.getObject(`${NS}.${GROUP}`)!.native.liteInterface).to.equal(VIRTUAL);
+            // the paramset fixes of the interface's daemon: virtual-devices for the heating group
+            expect(db.getObject(`${NS}.${GROUP}.1.SET_POINT_TEMPERATURE`)!.common.min).to.equal(4.5);
+            // names and rooms of every interface
+            await waitFor(() => db.getObject(`${NS}.${SW}`)?.common.name === 'Steckdose', 5000, 'the BidCos names');
+            await named();
+            expect(db.getObject(`${NS}.${SW}.1.STATE`)!.common.name).to.equal('Steckdose Schalter.STATE');
+            await waitFor(
+                () => db.getObject('enum.rooms.og_bad') !== undefined,
+                5000,
+                'the room of the BidCos channel',
+            );
+            expect(Object.values(db.getObject('enum.rooms.og_bad')!.common.members)).to.deep.equal([`${NS}.${SW}.1`]);
+            // the values of every interface are seeded
+            await waitFor(() => db.getState(`${NS}.${SW}.1.STATE`)?.val === true, 5000, 'the BidCos value');
+            expect(db.getState(`${CH1}.STATE`)?.val).to.equal(true);
+
+            // a state change goes to the interface of its device
+            await adapter!.stateChangeHandler(`${NS}.${SW}.1.STATE`, { val: false, ack: false } as ioBroker.State);
+            await adapter!.stateChangeHandler(`${CH1}.STATE`, { val: false, ack: false } as ioBroker.State);
+            await waitFor(() => box!.calls.filter(c => c.method === 'setValue').length === 2, 3000, 'both calls');
+            expect(box!.calls.filter(c => c.method === 'setValue').map(c => [c.interface, c.params[0]])).to.deep.equal([
+                [BIDCOS, `${SW}:1`],
+                [IFACE, `${DEVICE}:1`],
+            ]);
+            // an event of any interface reaches its state
+            box!.event(BIDCOS, `${SW}:1`, 'STATE', true);
+            await waitFor(() => db.getState(`${NS}.${SW}.1.STATE`)?.val === true, 3000, 'the BidCos event');
+        });
+
+        it('sends a script command without an address to the interface it names', async () => {
+            await startMulti();
+            await start(liteConfig());
+            await created();
+            const listed = await send(adapter!, onMessage, 'listDevices', { interface: BIDCOS });
+            expect(listed.error).to.equal(null);
+            expect(listed.result.map((d: { ADDRESS: string }) => d.ADDRESS)).to.deep.equal([SW, `${SW}:1`]);
+            const refused = await send(adapter!, onMessage, 'listDevices', {});
+            expect(String(refused.error)).to.match(/the interface must be given/);
+            const byAddress = await send(adapter!, onMessage, 'getParamset', {
+                ID: `${SW}:1`,
+                paramType: 'VALUES',
+            });
+            expect(byAddress.error).to.equal(null);
+            expect(box!.calls.at(-1)!.interface).to.equal(BIDCOS);
+            // a fault of the process named reaches the script
+            box!.opts.failing = [`${BIDCOS}.${SW}:1`];
+            const fault = await send(adapter!, onMessage, 'getParamset', {
+                ID: `${SW}:1`,
+                paramType: 'VALUES',
+                interface: BIDCOS,
+            });
+            expect(String(fault.error)).to.match(/Failure/);
+        });
+
+        it('removes stale objects per interface, keeps those of a stopped interface and records the interface of older objects', async () => {
+            await startMulti({
+                interfaces: [IFACE, BIDCOS, { name: VIRTUAL, running: false }],
+            });
+            const publish = (address: string, native: Record<string, unknown> = {}): void =>
+                db.publishObject({
+                    _id: `${NS}.${address}`,
+                    type: 'device',
+                    common: { name: address },
+                    native: { ADDRESS: address, VERSION: 1, ...native },
+                });
+            // an instance of the first builds that served HmIP-RF alone: no interface in its objects
+            publish(DEVICE, { TYPE: 'HmIP-PS' });
+            publish('GONE000BIDCOS', { liteInterface: BIDCOS });
+            db.publishObject({
+                _id: `${NS}.GONE000BIDCOS.1`,
+                type: 'channel',
+                common: { name: 'GONE000BIDCOS:1' },
+                native: { ADDRESS: 'GONE000BIDCOS:1', VERSION: 1, liteInterface: BIDCOS },
+            });
+            publish('GONE000VIRTUAL', { liteInterface: VIRTUAL });
+            publish('GONE000UNTAGGED');
+            await start(liteConfig());
+            await waitFor(() => db.getObject(`${NS}.GONE000BIDCOS`) === undefined, 5000, 'the stale BidCos device');
+            expect(db.getObject(`${NS}.GONE000BIDCOS.1`)).to.be.undefined;
+            await waitFor(() => db.getObject(DEV)?.native.liteInterface === IFACE, 5000, 'the interface recorded');
+            // the stopped interface keeps its objects, and one of no known interface stays while one is stopped
+            expect(db.getObject(`${NS}.GONE000VIRTUAL`)).not.to.be.undefined;
+            expect(db.getObject(`${NS}.GONE000UNTAGGED`)).not.to.be.undefined;
+
+            // all interfaces running: the picture is complete, the untagged one goes too
+            await new Promise<void>(res => void adapter!.unloadHandler(res));
+            adapter = undefined;
+            box!.setInterface(VIRTUAL, true);
+            await start(liteConfig());
+            await waitFor(() => db.getObject(`${NS}.GONE000UNTAGGED`) === undefined, 5000, 'the untagged device');
+            await waitFor(() => db.getObject(`${NS}.GONE000VIRTUAL`) === undefined, 5000, 'the virtual device');
+        });
+
+        it('logs what goes wrong while removing the stale objects, and goes on', async () => {
+            await startMulti();
+            await start(liteConfig());
+            await created();
+            const a = adapter as any;
+            const original = a.getForeignObjectsAsync;
+            a.getForeignObjectsAsync = () => Promise.reject(new Error('db gone'));
+            await a.removeStaleLiteObjects();
+            expect(
+                adapter!.log.error.calledWithMatch(/Cannot read the objects to remove the stale ones: db gone/),
+            ).to.equal(true);
+            a.getForeignObjectsAsync = original;
+            db.publishObject({
+                _id: `${NS}.STALE00001`,
+                type: 'device',
+                common: { name: 'stale' },
+                native: { ADDRESS: 'STALE00001', VERSION: 1 },
+            });
+            const known = db.getObject(DEV)!;
+            db.publishObject({ ...known, native: { ...known.native, liteInterface: undefined } } as ioBroker.Object);
+            a.extendObjectAsync = () => Promise.reject(new Error('read-only'));
+            a.delObjectAsync = () => Promise.reject(new Error('locked'));
+            await a.removeStaleLiteObjects();
+            expect(adapter!.log.warn.calledWithMatch(/Cannot record the interface of .*: read-only/)).to.equal(true);
+            expect(adapter!.log.error.calledWithMatch(/Could not delete obsolete device STALE00001: locked/)).to.equal(
+                true,
+            );
+            // without a connection there is nothing to compare with
+            a.lite = undefined;
+            await a.removeStaleLiteObjects();
+        });
+
+        it('connects when the other instances cannot be read', async () => {
+            await startMulti();
+            adapter = createAdapter(db, liteConfig());
+            const a = adapter as any;
+            const original = a.getForeignObjectsAsync;
+            a.getForeignObjectsAsync = (pattern: string, type: string) =>
+                type === 'instance' ? Promise.reject(new Error('db gone')) : original(pattern, type);
+            onMessage = adapter.messageHandler;
+            await adapter.readyHandler();
+            await created();
+            expect(adapter.log.debug.calledWithMatch(/Cannot read the other instances: db gone/)).to.equal(true);
+        });
+
+        it('stays idle when an instance with a lower number serves the same system', async () => {
+            await startMulti();
+            const parts = liteUrlPartsOf(box!.url);
+            db.publishObject({
+                _id: 'system.adapter.hm-rpc.0',
+                type: 'instance',
+                common: { enabled: true },
+                native: { daemon: 'openccu-lite', ...parts, liteToken: 'olt_other' },
+            } as any);
+            db.publishObject({
+                _id: 'system.adapter.hm-rpc.2',
+                type: 'instance',
+                common: { enabled: true },
+                native: { daemon: 'openccu-lite', ...parts, liteToken: 'olt_third' },
+            } as any);
+            adapter = createAdapter(db, liteConfig());
+            (adapter as any).instance = 1;
+            (adapter as any).namespace = 'hm-rpc.1';
+            onMessage = adapter.messageHandler;
+            await adapter.readyHandler();
+            expect(
+                adapter.log.warn.calledWithMatch(
+                    /hm-rpc\.0 already serves .* with all its interfaces: this instance stays idle/,
+                ),
+            ).to.equal(true);
+            expect(box!.streamsOpened).to.equal(0);
+        });
+
+        it('connects when the other instances serve another system, are disabled or not paired', async () => {
+            await startMulti();
+            const parts = liteUrlPartsOf(box!.url);
+            const other = (n: number, common: Record<string, unknown>, native: Record<string, unknown>): void =>
+                db.publishObject({
+                    _id: `system.adapter.hm-rpc.${n}`,
+                    type: 'instance',
+                    common,
+                    native: { daemon: 'openccu-lite', ...parts, liteToken: 'olt_x', ...native },
+                } as any);
+            other(0, { enabled: false }, {});
+            other(1, { enabled: true }, { homematicAddress: '192.0.2.1' });
+            other(2, { enabled: true }, { liteToken: '' });
+            other(3, { enabled: true }, { daemon: 'HMIP' });
+            adapter = createAdapter(db, liteConfig());
+            (adapter as any).instance = 4;
+            onMessage = adapter.messageHandler;
+            await adapter.readyHandler();
+            await created();
+        });
+    });
+
     describe('connection failures', () => {
         it('does not retry a refused token, asks for a new pairing', async () => {
             box = await startFakeBox();
@@ -537,42 +801,6 @@ describe('hm-rpc in the openccu-lite mode', function () {
             expect(answers).to.deep.include({ error: 'busy' });
             expect(answers).to.deep.include({ error: 'rejected' });
             expect(db.getState(`${NS}.info.pairing`)?.val).to.contain('rejected');
-        });
-
-        it('lists the interfaces of the system, or the ones lite-rpc carries without a token', async () => {
-            box = await startFakeBox({ interfaces: [IFACE, { name: 'BidCos-RF', running: false }] });
-            await start(liteConfig());
-            const parts = liteUrlPartsOf(box.url);
-            const list = await send(adapter!, onMessage, 'lite:interfaces', {
-                address: parts.homematicAddress,
-                port: parts.homematicPort,
-                https: 'false',
-                token: TOKEN,
-                fingerprint: '',
-            });
-            expect(list).to.deep.equal([
-                { value: 'BidCos-RF', label: 'BidCos-RF', description: 'not running' },
-                { value: IFACE, label: IFACE, description: 'running' },
-            ]);
-            const fallback = await send(adapter!, onMessage, 'lite:interfaces', {
-                address: parts.homematicAddress,
-                token: '',
-            });
-            expect(fallback.map((i: { value: string }) => i.value)).to.deep.equal([
-                'HmIP-RF',
-                'BidCos-RF',
-                'BidCos-Wired',
-                'VirtualDevices',
-            ]);
-            const refused = await send(adapter!, onMessage, 'lite:interfaces', {
-                ...parts,
-                address: parts.homematicAddress,
-                port: parts.homematicPort,
-                https: 'false',
-                token: 'olt_wrong',
-            });
-            expect(refused.length).to.equal(4);
-            expect(adapter!.log.warn.calledWithMatch(/Cannot read the interfaces/)).to.equal(true);
         });
 
         it('answers an unknown lite command with an error', async () => {

@@ -111,7 +111,8 @@ Change this value only in special cases.
 
 A CCU supports different device types (radio, wired, Homematic IP, CUxD, CCU-Jack).
 You must create a separate instance of the adapter for every type.
-The daemon `openccu-lite` connects an interface of an openccu-lite system, see [openccu-lite](#openccu-lite).
+The daemon `openccu-lite` is the exception: one instance connects every interface of an openccu-lite system, see
+[openccu-lite](#openccu-lite).
 
 #### Protocol
 
@@ -196,15 +197,18 @@ in a Docker container without any port forwarding.
 Select the daemon **openccu-lite** and enter the address of the system in "HomeMatic Address" (the port follows the
 "Use https" option: 443 or 80). Then:
 
-- **Interface**: the interface of the system this instance connects (`HmIP-RF`, `BidCos-RF`, `BidCos-Wired`,
-  `VirtualDevices`). As with a CCU, one instance connects one interface; once the instance is paired, the list shows the
-  interfaces the system runs.
+- **One instance per system**: the instance connects every interface the system runs (`HmIP-RF`, `BidCos-RF`,
+  `BidCos-Wired`, `VirtualDevices`), and follows an interface that is added or removed later. The devices of all
+  interfaces are objects of the one instance (`hm-rpc.0.<address>`); `native.liteInterface` of a device or channel
+  names its interface. A script command that names no address (`listDevices`, `getInstallMode`, ...) names the
+  interface in the message: `sendTo('hm-rpc.0', 'listDevices', {interface: 'BidCos-RF'}, cb)`.
+  An instance set up for one interface (the first builds of this mode) takes over the others at its next start;
+  further openccu-lite instances for the same system stay idle with a warning and can be deleted.
 - **Pair**: the instance must be running. Press the button: a six-digit code appears below it, together with a link to
   the Status page of the system. Approve the request there (as one of the system's administrators, with a password or a
   passkey) - the code on the Status page must match. The token and the fingerprint of the system's certificate are then
   stored in the instance configuration by themselves; save the configuration and the instance restarts with them. A
   rejected or expired request, a wrong address and a system without pairing are reported in the dialog.
-  Each instance pairs for a token of its own (a system allows a few event streams per token).
 - **Token** and **Certificate fingerprint** are filled by the pairing. An API token created on the system can be entered
   by hand as well; the fingerprint pins the certificate of the system (leave it empty if the certificate is trusted by
   Node.js, or the system is reached over HTTP).
@@ -216,7 +220,8 @@ Select the daemon **openccu-lite** and enter the address of the system in "HomeM
   enum, so devices of other adapters stay. Without this option the objects keep the address as name, as with a CCU.
 
 The devices are synchronized at every start of the instance (the system sends its device list with the stream), so
-"Synchronize objects (once)" is not needed on openccu-lite. "Don't delete devices" works as with a CCU. The values the
+"Synchronize objects (once)" is not needed on openccu-lite. "Don't delete devices" works as with a CCU; the objects of
+an interface that is not running are kept. The values the
 system holds are written into the states when the instance connects, so the states are current before the first event.
 The settings "Adapter Address", "Adapter Port", "Protocol", "Adapter Callback Address", "Check communication interval",
 "Reconnect interval", "Username" and "Password" do not apply and are hidden.
@@ -398,7 +403,7 @@ npm run update-images
 
 ### **WORK IN PROGRESS**
 - (copilot) Adapter requires node.js >= 22.19.0 now
-- (@hobbyquaker) New daemon `openccu-lite`: connects an interface of an [openccu-lite](https://github.com/openccu-lite/openccu-lite) system through its lite-rpc (requests with a token, events as a stream - no callback server). The pairing runs from the instance settings: press "Pair", approve the six-digit code on the Status page of the system, the token and the certificate fingerprint are stored by themselves. The names of the devices, channels and states, the rooms and functions come from the system's metadata and follow its changes live
+- (@hobbyquaker) New daemon `openccu-lite`: connects every interface of an [openccu-lite](https://github.com/openccu-lite/openccu-lite) system with one instance through its lite-rpc (requests with a token, events as a stream - no callback server). The pairing runs from the instance settings: press "Pair", approve the six-digit code on the Status page of the system, the token and the certificate fingerprint are stored by themselves. The names of the devices, channels and states, the rooms and functions come from the system's metadata and follow its changes live
 - (@gcaruso73) New option "Suppress interim levels of moving channels": the LEVEL of the acknowledgement of a dimmer or blind (`WORKING = true` / `PROCESS = NOT_STABLE`) is not written, so the state no longer jumps to the start value of the ramp before the final value arrives
 <!--
 	Placeholder for the next version (at the beginning of the line):

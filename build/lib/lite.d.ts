@@ -6,8 +6,6 @@
  * no callback server, no `init`. The names and rooms of devices and channels are the system's metadata.
  */
 import type { Daemon } from './_types';
-/** The interfaces lite-rpc carries (the names of `InterfacesList.xml`, as `GET /api/rpc/v1/interfaces` lists them) */
-export declare const LITE_INTERFACES: readonly ["HmIP-RF", "BidCos-RF", "BidCos-Wired", "VirtualDevices"];
 /** The scopes the pairing asks for: paramsets are written (`configure`), the names are read */
 export declare const LITE_ACCESS: {
     readonly devices: "configure";

@@ -75,6 +75,23 @@ export declare class HomematicRpc extends Adapter {
      */
     private startLite;
     /**
+     * Another enabled instance in the openccu-lite mode for the same system, with a lower number: an instance serves
+     * every interface of its system, so two would create every device twice. Left from the first builds of the mode, when an
+     * instance served one interface: the first one takes over the interfaces of the
+     * others, which stay idle until they are deleted.
+     *
+     * @param url the system of this instance
+     * @returns the id of the instance that serves the system, else undefined
+     */
+    private liteInstanceServing;
+    /**
+     * The daemon of a CCU a device corresponds to, for the CCU specific fixes of its paramset descriptions: on
+     * openccu-lite the one of its interface
+     *
+     * @param address the address of the device or channel
+     */
+    private daemonOf;
+    /**
      * The state of the lite-rpc connection: `ready` is connected, everything else (connecting, the stream lost,
      * the credential refused, closed) is not
      *
@@ -203,6 +220,16 @@ export declare class HomematicRpc extends Adapter {
      * @param params the method specific parameters
      */
     private rpcMethodCallAsyncHelper;
+    /**
+     * The method of a script's command: on openccu-lite, where one instance serves every interface, `interface` in
+     * the message names the interface process for a method without an address (`listDevices`, `getInstallMode`,
+     * ...); otherwise the request goes to the interface of the address
+     *
+     * @param method the method name
+     * @param params the method specific parameters
+     * @param iface the interface the message names, if any
+     */
+    private messageCallAsync;
     /**
      * Async variant of method call which also performs a retry on the first error of "setValue"
      *

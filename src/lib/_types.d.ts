@@ -113,7 +113,7 @@ export interface ListDevicesEntry {
     VERSION?: string;
 }
 
-/** The interface process of a CCU, or `openccu-lite`: lite-rpc of an openccu-lite system (the interface is `liteInterface`) */
+/** The interface process of a CCU, or `openccu-lite`: lite-rpc of an openccu-lite system (one instance for every interface of the system) */
 export type Daemon = 'CUxD' | 'virtual-devices' | 'rfd' | 'hs485d' | 'HMIP' | 'CCU-Jack' | 'openccu-lite';
 
 export interface FixParamsetParams {

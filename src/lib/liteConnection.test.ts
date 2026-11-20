@@ -1,8 +1,8 @@
 import { expect } from 'chai';
 import { afterEach, describe, it } from 'mocha';
 import type { FakeBox } from 'occulite-client/testing';
-import { LiteConnection, listLiteInterfaces, loadOcculite, type LiteModules } from './liteConnection';
-import { DEVICE, IFACE, startFakeBox, TOKEN, waitFor } from './liteTestUtil';
+import { LiteConnection, loadOcculite, type LiteModules } from './liteConnection';
+import { DEVICE, DEVICES, IFACE, startFakeBox, TOKEN, waitFor } from './liteTestUtil';
 
 type Call = { method: string; params: unknown[] };
 
@@ -39,7 +39,6 @@ describe('LiteConnection', function () {
             url: box!.url,
             token: opts.token ?? TOKEN,
             fingerprint: opts.fingerprint,
-            iface: IFACE,
             initId: 'hm-rpc.0',
             log: log(opts.lines),
             onStatus: s => statuses.push(s),
@@ -142,17 +141,26 @@ describe('LiteConnection', function () {
             params: [`${DEVICE}:1`, 'STATE', true],
         });
 
+        // a method without an address goes to the interface named
         const list = await new Promise((res, rej) =>
-            conn!.methodCall('listDevices', [], (err, r) => (err ? rej(new Error(err as string)) : res(r))),
+            conn!.callOn(IFACE, 'listDevices', [], (err, r) => (err ? rej(new Error(err as string)) : res(r))),
         );
         expect((list as unknown[]).length).to.equal(3);
         // a null result (getValue of an unknown datapoint) is '' as the RPC clients give it
         const nothing = await new Promise((res, rej) =>
-            conn!.methodCall('getValue', ['NOPE:1', 'STATE'], (err, r) =>
+            conn!.methodCall('getValue', [`${DEVICE}:1`, 'NOPE'], (err, r) =>
                 err ? rej(new Error(err as string)) : res(r),
             ),
         );
         expect(nothing).to.equal('');
+        // without an address, or with one no interface knows, there is nowhere to send it
+        expect(await new Promise(res => conn!.methodCall('listDevices', [], err => res(err)))).to.equal(
+            'listDevices: names no address, the interface must be given',
+        );
+        expect(await new Promise(res => conn!.methodCall('getValue', ['NOPE:1', 'STATE'], err => res(err)))).to.equal(
+            'getValue: no interface of the system knows the address NOPE:1',
+        );
+        expect(box.calls.some(c => c.params[0] === 'NOPE:1')).to.equal(false);
     });
 
     it('hands a fault of the process over as its fault string, a client error with its code', async () => {
@@ -163,12 +171,12 @@ describe('LiteConnection', function () {
         );
         expect(fault).to.equal('Failure');
         // an unknown method is a fault of the process too (JSON-RPC -32601)
-        const unknown = await new Promise(res => conn!.methodCall('noSuchMethod', [], err => res(err)));
+        const unknown = await new Promise(res => conn!.callOn(IFACE, 'noSuchMethod', [], err => res(err)));
         expect(unknown).to.equal('unknown method noSuchMethod');
         // a system that is gone: the client's code names the kind
         await box.stop();
         box = undefined;
-        const gone = await new Promise(res => conn!.methodCall('ping', [], err => res(err)));
+        const gone = await new Promise(res => conn!.callOn(IFACE, 'ping', [], err => res(err)));
         expect(gone).to.match(/^unreachable: /);
     });
 
@@ -177,7 +185,6 @@ describe('LiteConnection', function () {
         const early = new LiteConnection({
             url: box.url,
             token: TOKEN,
-            iface: IFACE,
             initId: 'hm-rpc.0',
             log: log(),
             onStatus: () => undefined,
@@ -186,6 +193,9 @@ describe('LiteConnection', function () {
         expect(early.values).to.be.undefined;
         expect(typeof early.on('meta', () => undefined)).to.equal('function');
         expect(await new Promise(res => early.methodCall('ping', [], err => res(err)))).to.equal('not connected');
+        expect(await new Promise(res => early.callOn(IFACE, 'ping', [], err => res(err)))).to.equal('not connected');
+        expect(early.devices).to.be.undefined;
+        expect(early.interfaces).to.deep.equal([]);
 
         const { statuses } = await connect();
         conn!.close();
@@ -243,6 +253,122 @@ describe('LiteConnection', function () {
         expect(code).to.equal('unauthenticated');
     });
 
+    describe('several interfaces', () => {
+        const BIDCOS = 'BidCos-RF';
+        const BIDCOS_DEVICES = [
+            {
+                ADDRESS: 'MEQ0123456',
+                TYPE: 'HM-LC-Sw1-Pl-2',
+                VERSION: 1,
+                CHILDREN: ['MEQ0123456:1'],
+                PARAMSETS: ['MASTER'],
+            },
+            {
+                ADDRESS: 'MEQ0123456:1',
+                TYPE: 'SWITCH',
+                PARENT: 'MEQ0123456',
+                PARENT_TYPE: 'HM-LC-Sw1-Pl-2',
+                VERSION: 1,
+                PARAMSETS: ['MASTER', 'VALUES'],
+            },
+        ];
+
+        it('follows every interface: the snapshots marked with their interface, each request to its interface', async () => {
+            box = await startFakeBox({
+                interfaces: [IFACE, BIDCOS],
+                devices: { [IFACE]: structuredClone(DEVICES), [BIDCOS]: structuredClone(BIDCOS_DEVICES) },
+            });
+            const { calls } = await connect();
+            const snapshots = calls.filter(c => c.method === 'newDevices');
+            expect(snapshots.map(c => c.params[0])).to.deep.equal(['hm-rpc.0', 'hm-rpc.0']);
+            const tagged = snapshots.flatMap(c => c.params[1] as { ADDRESS: string; liteInterface: string }[]);
+            expect(tagged.find(d => d.ADDRESS === 'MEQ0123456:1')!.liteInterface).to.equal(BIDCOS);
+            expect(tagged.find(d => d.ADDRESS === DEVICE)!.liteInterface).to.equal(IFACE);
+            expect(conn!.interfaceOf('MEQ0123456:1')).to.equal(BIDCOS);
+            expect(conn!.interfaceOf(`${DEVICE}:1`)).to.equal(IFACE);
+            expect(conn!.interfaceOf('NOPE')).to.be.undefined;
+            expect(conn!.interfaces.map(i => i.name).sort()).to.deep.equal([BIDCOS, IFACE]);
+
+            await new Promise(res => conn!.methodCall('setValue', ['MEQ0123456:1', 'STATE', true], res));
+            await new Promise(res => conn!.methodCall('setValue', [`${DEVICE}:1`, 'STATE', true], res));
+            expect(box.calls.slice(-2).map(c => c.interface)).to.deep.equal([BIDCOS, IFACE]);
+
+            box.event(BIDCOS, 'MEQ0123456:1', 'STATE', false);
+            await waitFor(() => calls.some(c => c.method === 'event'));
+            expect(calls.find(c => c.method === 'event')!.params).to.deep.equal([
+                'hm-rpc.0',
+                'MEQ0123456:1',
+                'STATE',
+                false,
+            ]);
+        });
+
+        it('follows the devices of an interface as they come and go, and a replaced one', async () => {
+            box = await startFakeBox({
+                interfaces: [IFACE, BIDCOS],
+                devices: { [IFACE]: structuredClone(DEVICES), [BIDCOS]: structuredClone(BIDCOS_DEVICES) },
+            });
+            const { calls } = await connect();
+            box.push('deleteDevices', { interface: BIDCOS, addresses: ['MEQ0123456', 'MEQ0123456:1'] });
+            await waitFor(() => calls.some(c => c.method === 'deleteDevices'));
+            expect(conn!.interfaceOf('MEQ0123456')).to.be.undefined;
+            box.push('readdedDevice', { interface: BIDCOS, addresses: ['MEQ0123456'] });
+            await waitFor(() => calls.some(c => c.method === 'readdedDevice'));
+            expect(conn!.interfaceOf('MEQ0123456:1')).to.equal(BIDCOS);
+            box.replaceDevice(BIDCOS, 'MEQ0123456', 'MEQ0654321');
+            await waitFor(() => calls.some(c => c.method === 'replaceDevice'));
+            expect(conn!.interfaceOf('MEQ0123456')).to.be.undefined;
+            expect(conn!.interfaceOf('MEQ0654321')).to.equal(BIDCOS);
+        });
+
+        it('leaves out a device whose address another interface uses, with a warning, and all that belongs to it', async () => {
+            const twin = structuredClone(DEVICES).map(d => ({ ...d, TYPE: `X-${String(d.TYPE)}` }));
+            box = await startFakeBox({
+                interfaces: [IFACE, BIDCOS],
+                devices: { [IFACE]: structuredClone(DEVICES), [BIDCOS]: twin },
+            });
+            const lines: string[] = [];
+            const { calls } = await connect({ lines });
+            const descriptions = calls
+                .filter(c => c.method === 'newDevices')
+                .flatMap(c => c.params[1] as { ADDRESS: string; liteInterface: string }[]);
+            const owner = conn!.interfaceOf(DEVICE)!;
+            const other = owner === IFACE ? BIDCOS : IFACE;
+            expect(descriptions.filter(d => d.ADDRESS === DEVICE).map(d => d.liteInterface)).to.deep.equal([owner]);
+            expect(lines.filter(l => l.includes('is left out'))).to.deep.equal([
+                `warn The device ${DEVICE} of ${other} is left out: ${owner} has a device with the same address`,
+            ]);
+
+            // the events of the left-out one are dropped, single and in a multicall
+            box.event(other, `${DEVICE}:1`, 'STATE', false);
+            const batch = box.nextSeq();
+            box.event(other, `${DEVICE}:0`, 'UNREACH', true, batch);
+            box.event(owner, `${DEVICE}:0`, 'UNREACH', true, batch);
+            await waitFor(() => calls.some(c => c.method === 'system.multicall'));
+            await new Promise(res => setTimeout(res, 100));
+            expect(calls.filter(c => c.method === 'event')).to.deep.equal([]);
+            expect(calls.filter(c => c.method === 'system.multicall').map(c => c.params[0])).to.deep.equal([
+                [{ methodName: 'event', params: ['hm-rpc.0', `${DEVICE}:0`, 'UNREACH', true] }],
+            ]);
+
+            box.updateDevice(other, DEVICE, 2);
+            box.push('deleteDevices', { interface: other, addresses: [`${DEVICE}:1`] });
+            box.updateDevice(owner, DEVICE, 2);
+            await waitFor(() => calls.some(c => c.method === 'updateDevice'));
+            await new Promise(res => setTimeout(res, 100));
+            expect(calls.filter(c => c.method === 'updateDevice').map(c => c.params)).to.deep.equal([
+                ['hm-rpc.0', DEVICE, 2],
+            ]);
+            expect(calls.filter(c => c.method === 'deleteDevices').map(c => c.params)).to.deep.equal([
+                ['hm-rpc.0', []],
+            ]);
+            // the left-out one goes: its address is free for it when it comes again
+            box.push('deleteDevices', { interface: other, addresses: [DEVICE] });
+            await waitFor(() => calls.filter(c => c.method === 'deleteDevices').length === 2);
+            expect(conn!.interfaceOf(DEVICE)).to.equal(owner);
+        });
+    });
+
     it('takes a loader of its own and logs through the adapter', async () => {
         box = await startFakeBox({ interfacesRoute: false });
         const lines: string[] = [];
@@ -257,38 +383,5 @@ describe('LiteConnection', function () {
         expect(lines.some(l => l.startsWith('warn occulite-client: the interfaces list is not available'))).to.equal(
             true,
         );
-    });
-});
-
-describe('listLiteInterfaces', () => {
-    let box: FakeBox | undefined;
-
-    afterEach(async () => {
-        await box?.stop();
-        box = undefined;
-    });
-
-    it('lists the interfaces of the system with their state', async () => {
-        box = await startFakeBox({ interfaces: [IFACE, { name: 'BidCos-RF', running: false }] });
-        expect(await listLiteInterfaces({ url: box.url, token: TOKEN })).to.deep.equal([
-            { name: 'BidCos-RF', running: false },
-            { name: IFACE, running: true },
-        ]);
-    });
-
-    it('rejects with the reason for a wrong token', async () => {
-        box = await startFakeBox();
-        let code: string | undefined;
-        try {
-            await listLiteInterfaces({
-                url: box.url,
-                token: 'olt_wrong',
-                fingerprint: 'AB:CD:EF',
-                loader: loadOcculite,
-            });
-        } catch (e) {
-            code = (e as { code?: string }).code;
-        }
-        expect(code).to.equal('unauthenticated');
     });
 });

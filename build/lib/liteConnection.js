@@ -1,7 +1,7 @@
 "use strict";
 /**
  * The connection to an openccu-lite system through occulite-client: the requests go to lite-rpc with the
- * token, the events come from the stream the client opens, and `callbackEvents` turns them into the method
+ * token, the events of all its interfaces come from the stream the client opens, and `callbackEvents` turns them into the method
  * calls a callback server would make (`event`, `system.multicall`, `newDevices`, `deleteDevices`, ...) with
  * the same argument lists - so the adapter's handlers feed from the stream unchanged.
  *
@@ -10,7 +10,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.LiteConnection = void 0;
 exports.loadOcculite = loadOcculite;
-exports.listLiteInterfaces = listLiteInterfaces;
 const lite_1 = require("./lite");
 let loaded;
 /**
@@ -33,8 +32,15 @@ function loadOcculite() {
     })();
     return loaded;
 }
+/** Marks the interface in the interface id the callback emitter hands over, taken off again before the adapter sees it */
+const IFACE_MARK = '\u0000';
 /**
- * One instance's connection: one interface, one stream, the callbacks of the adapter fed from it
+ * One instance's connection: every interface of the system, one stream, the callbacks of the adapter fed from it.
+ *
+ * The objects of all interfaces live side by side under the instance (`hm-rpc.0.<address>`), so the connection
+ * keeps which interface each device belongs to: a request is sent to the interface of the address it names, and a
+ * device whose address another interface already uses (none of the CCU's interfaces share an address format, so
+ * this is not expected) is left out with a warning instead of mixing two devices in one object.
  */
 class LiteConnection {
     constructor(opts) {
@@ -46,6 +52,10 @@ class LiteConnection {
         };
         this.state = 'idle';
         this.closed = false;
+        /** device address → its interface, the first one that reported it */
+        this.owners = new Map();
+        /** `<iface>.<device address>` of the devices left out because another interface has the address */
+        this.clashes = new Set();
     }
     /**
      * Opens the connection. `register` gets the callback emitter before the stream starts, because the device
@@ -61,7 +71,6 @@ class LiteConnection {
             url: this.opts.url,
             auth: { token: this.opts.token },
             transport: modules.nodeTransport(trust),
-            interfaces: [this.opts.iface],
             timeout: this.opts.timeout,
             log: {
                 debug: (m) => this.opts.log.debug(m),
@@ -83,9 +92,104 @@ class LiteConnection {
             this.opts.log.info(`lite-rpc <- resync (${ev.reason}): the values were read again`);
             this.opts.onResync?.();
         });
-        this.server = modules.callbackEvents(box, { initId: this.opts.initId });
-        register(this.server);
+        // before the callback emitter's own listener, so a device is known before its newDevices reaches the adapter
+        box.on('devices', (ev) => this.trackDevices(ev));
+        this.server = modules.callbackEvents(box, { initId: (iface) => `${IFACE_MARK}${iface}` });
+        register(this.routed(this.server));
         await box.ready();
+    }
+    /**
+     * The interface a device or channel belongs to, undefined when no interface reported it
+     *
+     * @param address the address, e.g. `000A1B2C3D4E5F:1`
+     */
+    interfaceOf(address) {
+        return this.owners.get(deviceOf(address));
+    }
+    /**
+     * Whether a device of an interface was left out because another interface has its address
+     *
+     * @param iface the interface
+     * @param address the device's or a channel's address
+     */
+    clashing(iface, address) {
+        return this.clashes.has(`${iface}.${deviceOf(address)}`);
+    }
+    /** Keeps the owners of the device addresses in step with the device events of the stream */
+    trackDevices(ev) {
+        const addresses = ev.refs.map(ref => ref.slice(ref.indexOf('.') + 1));
+        const claim = (address) => {
+            const device = deviceOf(address);
+            const owner = this.owners.get(device);
+            if (owner === undefined) {
+                this.owners.set(device, ev.interface);
+            }
+            else if (owner !== ev.interface && !this.clashes.has(`${ev.interface}.${device}`)) {
+                this.clashes.add(`${ev.interface}.${device}`);
+                this.opts.log.warn(`The device ${device} of ${ev.interface} is left out: ${owner} has a device with the same address`);
+            }
+        };
+        const release = (address) => {
+            if (!address.includes(':') && this.owners.get(address) === ev.interface) {
+                this.owners.delete(address);
+            }
+            this.clashes.delete(`${ev.interface}.${address}`);
+        };
+        switch (ev.kind) {
+            case 'new':
+            case 'readded':
+                addresses.forEach(claim);
+                break;
+            case 'deleted':
+                addresses.forEach(release);
+                break;
+            case 'replaced':
+                // the client names both, from the stream or from the addresses' order
+                release(ev.old);
+                claim(ev.new);
+                break;
+        }
+    }
+    /**
+     * The callback emitter as the adapter sees it: the interface id is the adapter's again, the descriptions of a
+     * newDevices carry their interface (`liteInterface`), and what belongs to a left-out device is dropped
+     *
+     * @param server occulite-client's callback emitter, its interface ids marked
+     */
+    routed(server) {
+        const initId = this.opts.initId;
+        const ifaceOf = (id) => (typeof id === 'string' ? id.slice(IFACE_MARK.length) : '');
+        return {
+            on: (method, fn) => server.on(method, (err, params, callback) => {
+                if (method === 'system.multicall') {
+                    const calls = params[0].filter(c => !this.clashing(ifaceOf(c.params[0]), String(c.params[1])));
+                    if (calls.length) {
+                        fn(err, [calls.map(c => ({ ...c, params: [initId, ...c.params.slice(1)] }))], callback);
+                    }
+                    return;
+                }
+                const iface = ifaceOf(params[0]);
+                const rest = params.slice(1);
+                switch (method) {
+                    case 'newDevices':
+                        rest[0] = rest[0]
+                            .filter(d => !this.clashing(iface, d.ADDRESS))
+                            .map(d => ({ ...d, liteInterface: iface }));
+                        break;
+                    case 'deleteDevices':
+                    case 'readdedDevice':
+                        rest[0] = rest[0].filter(a => !this.clashing(iface, a));
+                        break;
+                    default:
+                        // event, updateDevice, replaceDevice: one address
+                        if (this.clashing(iface, String(rest[0]))) {
+                            return;
+                        }
+                }
+                fn(err, [initId, ...rest], callback);
+            }),
+            close: () => server.close(),
+        };
     }
     /** The live copy of the system's names and taxonomy */
     get meta() {
@@ -120,7 +224,30 @@ class LiteConnection {
             callback('not connected', undefined);
             return;
         }
-        this.box.call(this.opts.iface, method, params).then(result => callback(null, result ?? ''), (e) => callback((0, lite_1.rpcCallbackError)(e), undefined));
+        const iface = typeof params[0] === 'string' ? this.interfaceOf(params[0]) : undefined;
+        if (!iface) {
+            callback(typeof params[0] === 'string'
+                ? `${method}: no interface of the system knows the address ${params[0]}`
+                : `${method}: names no address, the interface must be given`, undefined);
+            return;
+        }
+        this.callOn(iface, method, params, callback);
+    }
+    /**
+     * A method of one interface process, for the requests that name no address (`listDevices`, `getInstallMode`,
+     * ...)
+     *
+     * @param iface the interface, e.g. `BidCos-RF`
+     * @param method the method name
+     * @param params its parameters
+     * @param callback (err, result)
+     */
+    callOn(iface, method, params, callback) {
+        if (!this.box || this.closed) {
+            callback('not connected', undefined);
+            return;
+        }
+        this.box.call(iface, method, params).then(result => callback(null, result ?? ''), (e) => callback((0, lite_1.rpcCallbackError)(e), undefined));
     }
     /** Closes the stream; nothing is de-registered, because nothing was registered */
     close() {
@@ -133,27 +260,12 @@ class LiteConnection {
 }
 exports.LiteConnection = LiteConnection;
 /**
- * The interfaces a system runs, from `GET /api/rpc/v1/interfaces` with the paired token
+ * The device a channel belongs to (the address itself for a device)
  *
- * @param opts the system and the credential
- * @param opts.url the system
- * @param opts.token the paired token
- * @param opts.fingerprint the certificate pinned at pairing
- * @param opts.loader loads occulite-client (the tests)
+ * @param address the address
  */
-async function listLiteInterfaces(opts) {
-    const modules = await (opts.loader ?? loadOcculite)();
-    const box = new modules.OccuLite({
-        url: opts.url,
-        auth: { token: opts.token },
-        transport: modules.nodeTransport(opts.fingerprint ? { fingerprint256: opts.fingerprint } : {}),
-        timeout: 10_000,
-    });
-    try {
-        return (await box.listInterfaces()).map(i => ({ name: i.name, running: i.running }));
-    }
-    finally {
-        box.close();
-    }
+function deviceOf(address) {
+    const colon = address.indexOf(':');
+    return colon < 0 ? address : address.slice(0, colon);
 }
 //# sourceMappingURL=liteConnection.js.map

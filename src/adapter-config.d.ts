@@ -26,8 +26,6 @@ declare global {
             liteToken: string;
             /** openccu-lite: the certificate pinned at pairing (SHA-256), '' over plain HTTP */
             liteFingerprint: string;
-            /** openccu-lite: the interface of this instance, e.g. `HmIP-RF` */
-            liteInterface: string;
             /** openccu-lite: name the objects and fill the rooms and functions from the system's metadata */
             liteNames: boolean;
         }

@@ -248,7 +248,6 @@
     "useHttps": false,
     "dontDelete": false,
     "suppressTransitionalLevel": false,
-    "liteInterface": "HmIP-RF",
     "liteToken": "",
     "liteFingerprint": "",
     "liteNames": true

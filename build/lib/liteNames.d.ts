@@ -38,7 +38,7 @@ export interface MetaReader {
 export declare class LiteNames {
     private readonly adapter;
     private readonly meta;
-    private readonly iface;
+    private readonly interfaceOf;
     private readonly lang;
     private timer;
     private running;
@@ -46,10 +46,10 @@ export declare class LiteNames {
     /**
      * @param adapter the adapter
      * @param meta the system's metadata, live
-     * @param iface the interface of this instance
+     * @param interfaceOf the interface of a device or channel of the system (the instance serves all of them)
      * @param lang the language the node names are taken in
      */
-    constructor(adapter: NamesAdapter, meta: MetaReader, iface: string, lang: string);
+    constructor(adapter: NamesAdapter, meta: MetaReader, interfaceOf: (address: string) => string | undefined, lang: string);
     /**
      * Applies the names soon: several changes in a row (an import, a renamed floor) become one pass
      *

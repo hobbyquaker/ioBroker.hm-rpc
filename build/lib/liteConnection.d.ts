@@ -1,6 +1,6 @@
 /**
  * The connection to an openccu-lite system through occulite-client: the requests go to lite-rpc with the
- * token, the events come from the stream the client opens, and `callbackEvents` turns them into the method
+ * token, the events of all its interfaces come from the stream the client opens, and `callbackEvents` turns them into the method
  * calls a callback server would make (`event`, `system.multicall`, `newDevices`, `deleteDevices`, ...) with
  * the same argument lists - so the adapter's handlers feed from the stream unchanged.
  *
@@ -35,9 +35,7 @@ export interface LiteConnectionOptions {
     token: string;
     /** the certificate pinned at pairing (SHA-256), empty when the system is reached over plain HTTP */
     fingerprint?: string;
-    /** the one interface this instance follows, e.g. `HmIP-RF` */
-    iface: string;
-    /** the first argument of every callback method (the interface id the adapter expects) */
+    /** the first argument of every callback method (the interface id the adapter expects), the same for every interface */
     initId: string;
     log: Pick<Console, 'debug' | 'info' | 'warn' | 'error'>;
     /** the client's state: connecting | ready | degraded | offline | closed */
@@ -49,7 +47,12 @@ export interface LiteConnectionOptions {
     loader?: LiteLoader;
 }
 /**
- * One instance's connection: one interface, one stream, the callbacks of the adapter fed from it
+ * One instance's connection: every interface of the system, one stream, the callbacks of the adapter fed from it.
+ *
+ * The objects of all interfaces live side by side under the instance (`hm-rpc.0.<address>`), so the connection
+ * keeps which interface each device belongs to: a request is sent to the interface of the address it names, and a
+ * device whose address another interface already uses (none of the CCU's interfaces share an address format, so
+ * this is not expected) is left out with a warning instead of mixing two devices in one object.
  */
 export declare class LiteConnection {
     private readonly opts;
@@ -59,6 +62,10 @@ export declare class LiteConnection {
     private box;
     private server;
     private closed;
+    /** device address → its interface, the first one that reported it */
+    private readonly owners;
+    /** `<iface>.<device address>` of the devices left out because another interface has the address */
+    private readonly clashes;
     constructor(opts: LiteConnectionOptions);
     /**
      * Opens the connection. `register` gets the callback emitter before the stream starts, because the device
@@ -68,6 +75,28 @@ export declare class LiteConnection {
      * @param register registers the adapter's handlers on the callback emitter
      */
     start(register: (server: CallbackServer) => void): Promise<void>;
+    /**
+     * The interface a device or channel belongs to, undefined when no interface reported it
+     *
+     * @param address the address, e.g. `000A1B2C3D4E5F:1`
+     */
+    interfaceOf(address: string): string | undefined;
+    /**
+     * Whether a device of an interface was left out because another interface has its address
+     *
+     * @param iface the interface
+     * @param address the device's or a channel's address
+     */
+    private clashing;
+    /** Keeps the owners of the device addresses in step with the device events of the stream */
+    private trackDevices;
+    /**
+     * The callback emitter as the adapter sees it: the interface id is the adapter's again, the descriptions of a
+     * newDevices carry their interface (`liteInterface`), and what belongs to a left-out device is dropped
+     *
+     * @param server occulite-client's callback emitter, its interface ids marked
+     */
+    private routed;
     /** The live copy of the system's names and taxonomy */
     get meta(): OccuLite['meta'] | undefined;
     /** The last value of every datapoint the system's state store keeps, keyed `<iface>.<address>.<KEY>` */
@@ -90,24 +119,16 @@ export declare class LiteConnection {
      * @param callback (err, result)
      */
     methodCall(method: string, params: unknown[], callback: (err: unknown, res: unknown) => void): void;
+    /**
+     * A method of one interface process, for the requests that name no address (`listDevices`, `getInstallMode`,
+     * ...)
+     *
+     * @param iface the interface, e.g. `BidCos-RF`
+     * @param method the method name
+     * @param params its parameters
+     * @param callback (err, result)
+     */
+    callOn(iface: string, method: string, params: unknown[], callback: (err: unknown, res: unknown) => void): void;
     /** Closes the stream; nothing is de-registered, because nothing was registered */
     close(): void;
 }
-/**
- * The interfaces a system runs, from `GET /api/rpc/v1/interfaces` with the paired token
- *
- * @param opts the system and the credential
- * @param opts.url the system
- * @param opts.token the paired token
- * @param opts.fingerprint the certificate pinned at pairing
- * @param opts.loader loads occulite-client (the tests)
- */
-export declare function listLiteInterfaces(opts: {
-    url: string;
-    token: string;
-    fingerprint?: string;
-    loader?: LiteLoader;
-}): Promise<{
-    name: string;
-    running: boolean;
-}[]>;

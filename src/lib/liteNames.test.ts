@@ -77,7 +77,7 @@ describe('LiteNames', () => {
             functions: [{ path: 'function/licht', name: 'Licht' }],
         });
         publishObjects();
-        names = new LiteNames(adapter, meta, IFACE, 'de');
+        names = new LiteNames(adapter, meta, () => IFACE, 'de');
     });
 
     afterEach(() => {
@@ -221,6 +221,39 @@ describe('LiteNames', () => {
         await names.apply();
         expect(db.getObject(`${NS}.odd`)!.common.name).to.equal('odd');
         expect(db.getObject('enum.rooms.manual')!.common.name).to.equal('Manual');
+    });
+
+    it('names each object by its own interface, the one recorded in the object first', async () => {
+        db.publishObject({
+            _id: `${NS}.MEQ0123456`,
+            type: 'device',
+            common: { name: 'MEQ0123456' },
+            native: { ADDRESS: 'MEQ0123456', liteInterface: 'BidCos-RF' },
+        });
+        db.publishObject({
+            _id: `${NS}.NOWHERE0001`,
+            type: 'device',
+            common: { name: 'kept' },
+            native: { ADDRESS: 'NOWHERE0001' },
+        });
+        meta.names.set('BidCos-RF.MEQ0123456', 'Steckdose');
+        meta.names.set('HmIP-RF.NOWHERE0001', 'wrong');
+        const asked: string[] = [];
+        names = new LiteNames(
+            adapter,
+            meta,
+            address => {
+                asked.push(address);
+                return address.startsWith(DEVICE) ? IFACE : undefined;
+            },
+            'de',
+        );
+        await names.apply();
+        expect(db.getObject(`${NS}.MEQ0123456`)!.common.name).to.equal('Steckdose');
+        expect(asked).not.to.include('MEQ0123456');
+        // an object no interface reports keeps its name
+        expect(db.getObject(`${NS}.NOWHERE0001`)!.common.name).to.equal('kept');
+        expect(db.getObject(DEV)!.common.name).to.equal('Stehlampe');
     });
 
     it('runs one more pass when asked for during a pass, and reports an error of a pass as a warning', async () => {

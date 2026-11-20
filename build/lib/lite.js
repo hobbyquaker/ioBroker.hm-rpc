@@ -7,7 +7,7 @@
  * no callback server, no `init`. The names and rooms of devices and channels are the system's metadata.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.PAIRING_TIMEOUT_MS = exports.LITE_ACCESS = exports.LITE_INTERFACES = void 0;
+exports.PAIRING_TIMEOUT_MS = exports.LITE_ACCESS = void 0;
 exports.interfaceDaemon = interfaceDaemon;
 exports.liteUrlOf = liteUrlOf;
 exports.liteUrlParts = liteUrlParts;
@@ -20,8 +20,6 @@ exports.datapointName = datapointName;
 exports.enumIdOfPath = enumIdOfPath;
 exports.enumsOfNodes = enumsOfNodes;
 const tools_1 = require("./tools");
-/** The interfaces lite-rpc carries (the names of `InterfacesList.xml`, as `GET /api/rpc/v1/interfaces` lists them) */
-exports.LITE_INTERFACES = ['HmIP-RF', 'BidCos-RF', 'BidCos-Wired', 'VirtualDevices'];
 /** The scopes the pairing asks for: paramsets are written (`configure`), the names are read */
 exports.LITE_ACCESS = { devices: 'configure', names: 'read' };
 /** The pairing waits at most this long for the approval (the system lets a request expire after five minutes) */

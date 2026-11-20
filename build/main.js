@@ -260,9 +260,8 @@ class HomematicRpc extends adapter_core_1.Adapter {
         await this.migrateDeviceIcons();
         const lite = this.config.daemon === 'openccu-lite';
         if (lite) {
-            // the interface decides the daemon from here on: its paramset fixes and the device filter of newDevices
-            // apply as on a CCU
-            this.config.daemon = (0, lite_1.interfaceDaemon)(this.config.liteInterface);
+            // one instance serves every interface of the system: the daemon of a device follows from its interface
+            // (daemonOf), its paramset fixes apply as on a CCU
             this.config.type = 'xml';
             await this.ensurePairing();
             if (!this.config.homematicAddress || !this.config.liteToken) {
@@ -385,18 +384,22 @@ class HomematicRpc extends adapter_core_1.Adapter {
         clientId = this.namespace;
         this.clientIdPrefix = '';
         const url = (0, lite_1.liteUrlOf)(this.config);
+        const serving = await this.liteInstanceServing(url);
+        if (serving) {
+            this.log.warn(`${serving} already serves ${url} with all its interfaces: this instance stays idle. Its objects can be deleted together with the instance`);
+            return;
+        }
         this.lite = new liteConnection_1.LiteConnection({
             url,
             token: this.config.liteToken,
             fingerprint: this.config.liteFingerprint,
-            iface: this.config.liteInterface,
             initId: this.namespace,
             log: this.log,
             onStatus: state => this.onLiteStatus(state),
             onResync: () => this.seedLiteValues(),
         });
         rpcClient = this.lite.client;
-        this.log.info(`lite-rpc client is connecting to ${url} for the interface ${this.config.liteInterface}`);
+        this.log.info(`lite-rpc client is connecting to ${url} for all its interfaces`);
         try {
             await this.lite.start(server => this.registerCallbackHandlers(server));
         }
@@ -415,13 +418,51 @@ class HomematicRpc extends adapter_core_1.Adapter {
             return;
         }
         if (this.config.liteNames !== false && this.lite.meta) {
-            this.liteNames = new liteNames_1.LiteNames(this, this.lite.meta, this.config.liteInterface, this.liteLanguage);
+            const lite = this.lite;
+            this.liteNames = new liteNames_1.LiteNames(this, lite.meta, address => lite.interfaceOf(address), this.liteLanguage);
             // every change of the names, rooms and functions on the system, once the client's copy is in step again
             // (right after a change applied in place, or once the snapshot is read again): a pass, debounced
             this.lite.on('metaSettled', () => this.liteNames?.schedule());
             this.liteNames.schedule();
         }
         this.seedLiteValues();
+    }
+    /**
+     * Another enabled instance in the openccu-lite mode for the same system, with a lower number: an instance serves
+     * every interface of its system, so two would create every device twice. Left from the first builds of the mode, when an
+     * instance served one interface: the first one takes over the interfaces of the
+     * others, which stay idle until they are deleted.
+     *
+     * @param url the system of this instance
+     * @returns the id of the instance that serves the system, else undefined
+     */
+    async liteInstanceServing(url) {
+        let instances;
+        try {
+            instances = await this.getForeignObjectsAsync(`system.adapter.${this.name}.*`, 'instance');
+        }
+        catch (e) {
+            this.log.debug(`Cannot read the other instances: ${e.message}`);
+            return undefined;
+        }
+        const number = (id) => parseInt(id.slice(id.lastIndexOf('.') + 1), 10);
+        return Object.values(instances)
+            .filter(obj => number(obj._id) < (this.instance ?? 0) &&
+            obj.common?.enabled &&
+            obj.native?.daemon === 'openccu-lite' &&
+            obj.native?.liteToken &&
+            (0, lite_1.liteUrlOf)(obj.native) === url)
+            .map(obj => obj._id.replace('system.adapter.', ''))
+            .sort((a, b) => number(a) - number(b))[0];
+    }
+    /**
+     * The daemon of a CCU a device corresponds to, for the CCU specific fixes of its paramset descriptions: on
+     * openccu-lite the one of its interface
+     *
+     * @param address the address of the device or channel
+     */
+    daemonOf(address) {
+        return this.lite ? (0, lite_1.interfaceDaemon)(this.lite.interfaceOf(String(address)) ?? '') : this.config.daemon;
     }
     /**
      * The state of the lite-rpc connection: `ready` is connected, everything else (connecting, the stream lost,
@@ -447,15 +488,13 @@ class HomematicRpc extends adapter_core_1.Adapter {
      * but a device paired later comes alone.
      */
     async removeStaleLiteObjects() {
-        const devices = this.lite?.devices;
-        if (!devices || this.config.dontDelete) {
+        const lite = this.lite;
+        const devices = lite?.devices;
+        if (!lite || !devices) {
             return;
         }
-        const iface = this.config.liteInterface;
-        if (!this.lite.interfaces.some(i => i.name === iface && i.running)) {
-            // a stopped interface process has no device list: its objects stay
-            return;
-        }
+        const running = new Set(lite.interfaces.filter(i => i.running).map(i => i.name));
+        const complete = lite.interfaces.length > 0 && running.size === lite.interfaces.length;
         let objects;
         try {
             objects = {
@@ -469,10 +508,24 @@ class HomematicRpc extends adapter_core_1.Adapter {
         }
         for (const obj of Object.values(objects)) {
             const address = obj.native?.ADDRESS;
-            if (typeof address !== 'string' || devices.has(`${iface}.${address}`)) {
+            if (typeof address !== 'string') {
                 continue;
             }
             const id = obj._id.slice(this.namespace.length + 1);
+            const owner = lite.interfaceOf(address);
+            if (owner && devices.has(`${owner}.${address}`)) {
+                if (obj.native.liteInterface !== owner) {
+                    // an object of an instance that served one interface (the first builds of the mode)
+                    await this.extendObjectAsync(id, { native: { liteInterface: owner } }).catch((e) => this.log.warn(`Cannot record the interface of ${id}: ${e.message}`));
+                }
+                continue;
+            }
+            // a stopped interface process has no device list: its objects stay, as do those of an interface that is
+            // not known at all while one is stopped
+            const recorded = typeof obj.native.liteInterface === 'string' ? obj.native.liteInterface : undefined;
+            if (this.config.dontDelete || !(recorded ? running.has(recorded) : complete)) {
+                continue;
+            }
             if (!(await this.getObjectAsync(id))) {
                 // the channel of a device removed a moment ago
                 continue;
@@ -499,17 +552,19 @@ class HomematicRpc extends adapter_core_1.Adapter {
         if (!values) {
             return;
         }
-        const prefix = `${this.config.liteInterface}.`;
         let seeded = 0;
         for (const [ref, value] of values) {
-            if (!ref.startsWith(prefix) || !value.confirmed) {
+            if (!value.confirmed) {
                 continue;
             }
-            const datapoint = ref.slice(prefix.length);
-            const dot = datapoint.lastIndexOf('.');
-            const address = datapoint.slice(0, dot);
-            const key = datapoint.slice(dot + 1);
-            if (devices && !devices.includes(address.split(':')[0])) {
+            // `<iface>.<address>.<KEY>`: the interface before the first dot, the key after the last
+            const first = ref.indexOf('.');
+            const dot = ref.lastIndexOf('.');
+            const iface = ref.slice(0, first);
+            const address = ref.slice(first + 1, dot);
+            const key = ref.slice(dot + 1);
+            if ((devices && !devices.includes(address.split(':')[0])) || this.lite.interfaceOf(address) !== iface) {
+                // not asked for, or a device left out for the address of another interface's device
                 continue;
             }
             const id = `${this.namespace}.${address.replace(':', '.').replace(tools.FORBIDDEN_CHARS, '_')}.${key}`;
@@ -598,36 +653,6 @@ class HomematicRpc extends adapter_core_1.Adapter {
                 }
                 catch (e) {
                     answer({ error: e instanceof litePairing_1.PairingError ? e.code : 'failed' });
-                }
-                return;
-            }
-            case 'lite:interfaces': {
-                // the interfaces the system runs, for the select; the ones lite-rpc carries while there is no token
-                const fallback = lite_1.LITE_INTERFACES.map(name => ({ value: name, label: name }));
-                const url = (0, lite_1.liteUrlOf)({
-                    homematicAddress: String(message.address ?? ''),
-                    homematicPort: String(message.port ?? ''),
-                    useHttps: message.https !== false && message.https !== 'false',
-                });
-                if (!url || !message.token) {
-                    answer(fallback);
-                    return;
-                }
-                try {
-                    const list = await (0, liteConnection_1.listLiteInterfaces)({
-                        url,
-                        token: message.token,
-                        fingerprint: message.fingerprint || undefined,
-                    });
-                    answer(list.map(i => ({
-                        value: i.name,
-                        label: i.name,
-                        description: i.running ? 'running' : 'not running',
-                    })));
-                }
-                catch (e) {
-                    this.log.warn(`Cannot read the interfaces of ${url}: ${e.message}`);
-                    answer(fallback);
                 }
                 return;
             }
@@ -905,7 +930,7 @@ class HomematicRpc extends adapter_core_1.Adapter {
             try {
                 if (rpcClient && connected) {
                     // if device specific command, send it's ID and paramType
-                    const data = await this.rpcMethodCallAsync(obj.command, obj.message.ID !== undefined ? [obj.message.ID, obj.message.paramType] : []);
+                    const data = await this.messageCallAsync(obj.command, obj.message.ID !== undefined ? [obj.message.ID, obj.message.paramType] : [], obj.message.interface);
                     if (obj.callback) {
                         this.sendTo(obj.from, obj.command, {
                             result: data,
@@ -928,11 +953,7 @@ class HomematicRpc extends adapter_core_1.Adapter {
         else {
             try {
                 if (rpcClient && connected) {
-                    const data = await this.rpcMethodCallAsync(obj.command, [
-                        obj.message.ID,
-                        obj.message.paramType,
-                        obj.message.params,
-                    ]);
+                    const data = await this.messageCallAsync(obj.command, [obj.message.ID, obj.message.paramType, obj.message.params], obj.message.interface);
                     if (obj.callback) {
                         this.sendTo(obj.from, obj.command, {
                             result: data,
@@ -1493,7 +1514,7 @@ class HomematicRpc extends adapter_core_1.Adapter {
      */
     async addParamsetObjects(channel, paramset) {
         for (const [key, paramObj] of Object.entries(paramset)) {
-            tools.fixParamset({ paramObj, daemon: this.config.daemon });
+            tools.fixParamset({ paramObj, daemon: this.daemonOf(channel.native?.ADDRESS) });
             const obj = {
                 type: 'state',
                 common: {
@@ -1673,6 +1694,22 @@ class HomematicRpc extends adapter_core_1.Adapter {
                 }
             });
         });
+    }
+    /**
+     * The method of a script's command: on openccu-lite, where one instance serves every interface, `interface` in
+     * the message names the interface process for a method without an address (`listDevices`, `getInstallMode`,
+     * ...); otherwise the request goes to the interface of the address
+     *
+     * @param method the method name
+     * @param params the method specific parameters
+     * @param iface the interface the message names, if any
+     */
+    messageCallAsync(method, params, iface) {
+        if (!this.lite || typeof iface !== 'string' || !iface) {
+            return this.rpcMethodCallAsync(method, params);
+        }
+        const lite = this.lite;
+        return new Promise((resolve, reject) => lite.callOn(iface, method, params, (err, res) => (err ? reject(new Error(err)) : resolve(res))));
     }
     /**
      * Async variant of method call which also performs a retry on the first error of "setValue"

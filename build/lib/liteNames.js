@@ -14,13 +14,13 @@ class LiteNames {
     /**
      * @param adapter the adapter
      * @param meta the system's metadata, live
-     * @param iface the interface of this instance
+     * @param interfaceOf the interface of a device or channel of the system (the instance serves all of them)
      * @param lang the language the node names are taken in
      */
-    constructor(adapter, meta, iface, lang) {
+    constructor(adapter, meta, interfaceOf, lang) {
         this.adapter = adapter;
         this.meta = meta;
-        this.iface = iface;
+        this.interfaceOf = interfaceOf;
         this.lang = lang;
         this.again = false;
     }
@@ -80,7 +80,13 @@ class LiteNames {
             if (typeof address !== 'string') {
                 continue;
             }
-            const ref = (0, lite_1.refOfAddress)(this.iface, address);
+            const recorded = obj.native?.liteInterface;
+            const iface = typeof recorded === 'string' && recorded ? recorded : this.interfaceOf(address);
+            if (!iface) {
+                // no interface of the system reports it (yet): its name is unknown
+                continue;
+            }
+            const ref = (0, lite_1.refOfAddress)(iface, address);
             const systemName = this.meta.name(ref);
             if (obj.type === 'channel') {
                 channelNames.set(obj._id, systemName);

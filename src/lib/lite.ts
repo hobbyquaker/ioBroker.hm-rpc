@@ -9,9 +9,6 @@
 import type { Daemon } from './_types';
 import { FORBIDDEN_CHARS } from './tools';
 
-/** The interfaces lite-rpc carries (the names of `InterfacesList.xml`, as `GET /api/rpc/v1/interfaces` lists them) */
-export const LITE_INTERFACES = ['HmIP-RF', 'BidCos-RF', 'BidCos-Wired', 'VirtualDevices'] as const;
-
 /** The scopes the pairing asks for: paramsets are written (`configure`), the names are read */
 export const LITE_ACCESS = { devices: 'configure', names: 'read' } as const;
 

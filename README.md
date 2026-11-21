@@ -397,6 +397,7 @@ npm run update-images
 ## Changelog
 ### **WORK IN PROGRESS**
 - (@hobbyquaker) openccu-lite: a device paired later no longer deletes the objects of the other devices of the instance; objects of devices removed on the system are cleaned up when the instance connects, without leaving broken objects behind ("obj.type has to exist")
+- (@hobbyquaker) openccu-lite: the help text of the interface field is shown in the admin's language
 
 ### 4.3.0 (2026-11-18)
 - (copilot) Adapter requires node.js >= 22.19.0 now
